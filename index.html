@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AR 공간 실측 및 음향 분석기</title>
+    <!-- Tailwind CSS (스타일링) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js (3D 렌더링) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <style>
+        /* 기본 리셋 및 전체 화면 설정 */
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #0B0E14; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+        
+        /* 백그라운드 요소들 */
+        #camera-feed { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; transition: opacity 0.5s ease; }
+        #fallback-bg { position: absolute; inset: 0; background: radial-gradient(circle at center, #1a1f2c 0%, #0B0E14 100%); z-index: -1; }
+        
+        /* 3D 렌더링 캔버스 컨테이너 */
+        #three-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; opacity: 0; transition: opacity 1s ease; }
+        
+        /* 십자선 UI (크로스헤어) */
+        #crosshair { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 40px; z-index: 20; pointer-events: none; display: none; transition: opacity 0.2s; }
+        #crosshair::before, #crosshair::after { content: ''; position: absolute; background: #00F0FF; box-shadow: 0 0 8px rgba(0, 240, 255, 0.8); }
+        #crosshair::before { top: 50%; left: 0; width: 100%; height: 2px; transform: translateY(-50%); }
+        #crosshair::after { left: 50%; top: 0; height: 100%; width: 2px; transform: translateX(-50%); }
+        #crosshair .center-dot { position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: red; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 5px red; }
+
+        /* 하단 오버레이 패널 (Bottom Sheet) */
+        .bottom-sheet {
+            position: absolute; bottom: 0; left: 0; width: 100%;
+            background: rgba(15, 20, 30, 0.85);
+            backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            border-top-left-radius: 24px; border-top-right-radius: 24px;
+            padding: 24px; padding-bottom: 40px; box-sizing: border-box;
+            transform: translateY(120%);
+            transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s ease;
+            opacity: 0; z-index: 30; pointer-events: none;
+            box-shadow: 0 -10px 40px rgba(0,0,0,0.5);
+        }
+        .bottom-sheet.active { transform: translateY(0); opacity: 1; pointer-events: auto; }
+
+        /* 커스텀 스크롤바 숨기기 */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .glass-btn { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); }
+    </style>
+</head>
+<body class="antialiased">
+
+    <!-- 레이어 1: 웹캠 화면 (배경) -->
+    <div id="fallback-bg"></div>
+    <video id="camera-feed" autoplay playsinline muted></video>
+
+    <!-- 레이어 2: Three.js 3D 렌더링 캔버스 -->
+    <div id="three-container"></div>
+
+    <!-- 레이어 3: AR 타겟팅 십자선 -->
+    <div id="crosshair">
+        <div class="center-dot"></div>
+    </div>
+
+    <!-- 상단 상태 바 UI -->
+    <div class="absolute top-0 left-0 w-full p-6 z-20 pointer-events-none">
+        <h1 class="text-xl font-bold tracking-tight text-white drop-shadow-lg">AcousticAR</h1>
+        <p id="hud-status" class="text-xs text-blue-400 mt-1 drop-shadow-md">시스템 대기 중</p>
+    </div>
+
+    <!-- 하단 패널: Step 1. 시작 화면 -->
+    <div id="step-intro" class="bottom-sheet active">
+        <div class="w-12 h-1 bg-white/20 rounded-full mx-auto mb-6"></div>
+        <h2 class="text-xl font-bold mb-2 text-white">공간 실측 준비</h2>
+        <p class="text-sm text-gray-400 mb-6 leading-relaxed">카메라를 사용하여 방의 4개 모서리를 겨냥해 실측 데이터를 수집하고, 3D 공간을 모델링합니다.</p>
+        <button onclick="startMeasurement()" class="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl active:scale-95 transition-all shadow-[0_0_15px_rgba(37,99,235,0.5)]">
+            실측 시작하기
+        </button>
+    </div>
+
+    <!-- 하단 패널: Step 2. AR 실측 프로세스 -->
+    <div id="step-measure" class="bottom-sheet">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-bold">포인트 스캔</h2>
+            <span id="point-counter" class="bg-blue-600/30 text-blue-400 text-xs px-3 py-1 rounded-full border border-blue-500/30">0 / 4 완료</span>
+        </div>
+        <p id="measure-instruction" class="text-sm text-gray-300 mb-6 bg-black/30 p-3 rounded-lg border border-white/5">
+            화면 중앙의 십자선을 방의 <b>첫 번째 바닥 모서리</b>에 맞추고 버튼을 누르세요.
+        </p>
+        <button onclick="addPoint()" class="w-full bg-cyan-500 hover:bg-cyan-600 py-4 rounded-xl font-bold text-black shadow-[0_0_15px_rgba(6,182,212,0.6)] active:scale-95 transition-all">
+            이 지점 기록하기
+        </button>
+    </div>
+
+    <!-- 하단 패널: Step 3. 3D 모델링 및 음향 시뮬레이션 결과 -->
+    <div id="step-result" class="bottom-sheet max-h-[60vh] overflow-y-auto no-scrollbar">
+        <div class="w-12 h-1 bg-white/20 rounded-full mx-auto mb-4 shrink-0"></div>
+        <h2 class="text-lg font-bold mb-4">I-Simpa 음향 분석 결과</h2>
+        
+        <!-- 실측 데이터 섹션 -->
+        <div class="grid grid-cols-2 gap-3 mb-4">
+            <div class="bg-white/5 border border-white/10 p-3 rounded-xl">
+                <p class="text-[10px] text-gray-400 uppercase tracking-wider mb-1">추정된 크기 (W x D)</p>
+                <p id="room-size" class="font-bold text-cyan-400 text-sm">계산 중...</p>
+            </div>
+            <div class="bg-white/5 border border-white/10 p-3 rounded-xl">
+                <p class="text-[10px] text-gray-400 uppercase tracking-wider mb-1">공간 체적</p>
+                <p id="room-volume" class="font-bold text-cyan-400 text-sm">계산 중...</p>
+            </div>
+        </div>
+
+        <!-- 시뮬레이션 수치 섹션 -->
+        <div class="bg-black/40 border border-white/10 rounded-xl p-4 mb-5">
+            <div class="flex justify-between items-center border-b border-white/10 pb-3 mb-3">
+                <div>
+                    <p class="text-xs text-gray-400 mb-1">잔향 시간 (RT60)</p>
+                    <p class="text-2xl font-bold text-red-400 transition-colors duration-1000" id="rt60-value">1.8s</p>
+                </div>
+                <div class="text-right">
+                    <p class="text-xs text-gray-400 mb-1">음성 명료도 (STI)</p>
+                    <p class="text-2xl font-bold text-yellow-400 transition-colors duration-1000" id="sti-value">0.45 <span class="text-sm font-normal text-gray-500">(Poor)</span></p>
+                </div>
+            </div>
+            <p class="text-[10px] text-gray-500 text-center">* 3D 모델의 반사율을 기반으로 한 가상 시뮬레이션입니다.</p>
+        </div>
+
+        <!-- 액션 버튼 -->
+        <div class="space-y-3">
+            <button onclick="applyAcousticTreatment()" id="btn-treatment" class="w-full bg-purple-600 hover:bg-purple-700 py-3.5 rounded-xl font-bold text-white shadow-[0_0_15px_rgba(147,51,234,0.4)] active:scale-95 transition-all flex items-center justify-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                흡음재 자동 매칭 및 적용
+            </button>
+            <button onclick="exportSKP()" class="w-full glass-btn py-3.5 rounded-xl font-medium text-white active:scale-95 transition-all">
+                SKP 형식으로 내보내기
+            </button>
+        </div>
+    </div>
+
+    <!-- 알림창 (Toast) -->
+    <div id="toast" class="fixed top-8 left-1/2 -translate-x-1/2 bg-white text-black px-6 py-3 rounded-full shadow-2xl font-bold text-sm z-50 transition-all duration-300 opacity-0 pointer-events-none translate-y-[-20px] whitespace-nowrap">
+        알림 메시지
+    </div>
+
+    <script>
+        // --- 1. 카메라 연동 및 초기화 ---
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                document.getElementById('camera-feed').srcObject = stream;
+            } catch (err) {
+                console.warn("카메라 접근 권한이 없거나 지원하지 않는 기기입니다. 가상 배경을 사용합니다.");
+            }
+        }
+        window.addEventListener('load', initCamera);
+
+        // --- 2. UI 플로우 상태 관리 ---
+        let points = 0;
+        const roomData = { width: 0, depth: 0, height: 2.8 }; // 기본 천장 높이를 2.8m로 가정
+
+        function showPanel(panelId) {
+            document.querySelectorAll('.bottom-sheet').forEach(el => el.classList.remove('active'));
+            document.getElementById(panelId).classList.add('active');
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.remove('opacity-0', 'translate-y-[-20px]');
+            toast.classList.add('opacity-100', 'translate-y-0');
+            setTimeout(() => {
+                toast.classList.remove('opacity-100', 'translate-y-0');
+                toast.classList.add('opacity-0', 'translate-y-[-20px]');
+            }, 3000);
+        }
+
+        function startMeasurement() {
+            showPanel('step-measure');
+            document.getElementById('crosshair').style.display = 'block';
+            document.getElementById('hud-status').innerHTML = '<span class="text-cyan-400">포인트 스캔 중...</span>';
+        }
+
+        function addPoint() {
+            points++;
+            document.getElementById('point-counter').innerText = `${points} / 4 완료`;
+            
+            // 십자선 시각적 피드백 (깜빡임 효과)
+            const crosshair = document.getElementById('crosshair');
+            crosshair.style.opacity = '0.2';
+            crosshair.style.transform = 'translate(-50%, -50%) scale(1.2)';
+            setTimeout(() => {
+                crosshair.style.opacity = '1';
+                crosshair.style.transform = 'translate(-50%, -50%) scale(1)';
+            }, 150);
+
+            // 단계별 안내 텍스트 변경
+            const instructions = [
+                "첫 번째 바닥 모서리",
+                "두 번째 모서리로 이동하여 타겟팅 하세요.",
+                "세 번째 모서리를 찾아 타겟팅 하세요.",
+                "마지막 네 번째 모서리를 타겟팅 하세요.",
+                "데이터 분석 중..."
+            ];
+            
+            if (points < 4) {
+                document.getElementById('measure-instruction').innerHTML = instructions[points];
+            } else if (points === 4) {
+                // 4포인트 스캔 완료 시
+                document.getElementById('measure-instruction').innerHTML = instructions[4];
+                document.getElementById('crosshair').style.display = 'none';
+                
+                // 가짜 로딩 후 결과 화면으로 전환
+                setTimeout(generateAndRenderRoom, 1200);
+            }
+        }
+
+        // --- 3. Three.js 3D 모델링 생성 및 렌더링 ---
+        let scene, camera, renderer, roomMesh;
+        let isThreeInitialized = false;
+
+        function initThreeJS() {
+            const container = document.getElementById('three-container');
+            
+            scene = new THREE.Scene();
+            // 카메라 화면이 잘 보이도록 투명한 배경 처리
+            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            // 카메라를 방 중앙보다 살짝 위, 뒤쪽으로 빼서 방이 잘 보이게 세팅
+            camera.position.set(0, 1.5, 4);
+
+            // 조명 세팅
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            directionalLight.position.set(2, 5, 3);
+            scene.add(directionalLight);
+
+            isThreeInitialized = true;
+            
+            // 창 크기 변경 대응
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function generateAndRenderRoom() {
+            showPanel('step-result');
+            document.getElementById('hud-status').innerHTML = '<span class="text-green-400">모델링 완료</span>';
+            document.getElementById('camera-feed').style.opacity = '0.3'; // 배경 카메라 어둡게
+            document.getElementById('three-container').style.opacity = '1'; // 3D 캔버스 표시
+
+            if (!isThreeInitialized) initThreeJS();
+
+            // 가상의 실측 사이즈 계산 (Random 3~5m)
+            roomData.width = (Math.random() * 1 + 2).toFixed(1);
+            roomData.depth = (Math.random() * 1 + 2).toFixed(1);
+            const volume = (roomData.width * roomData.depth * roomData.height).toFixed(1);
+
+            // UI 텍스트 업데이트
+            document.getElementById('room-size').innerText = `${roomData.width}m x ${roomData.depth}m`;
+            document.getElementById('room-volume').innerText = `${volume} m³ (H: ${roomData.height}m)`;
+
+            // 방 형태의 Box 생성
+            const geometry = new THREE.BoxGeometry(roomData.width, roomData.height, roomData.depth);
+            
+            // AR 환경에 맞게 반투명한 기본 벽체 재질 (회색 유리 느낌)
+            const wallMaterial = new THREE.MeshPhysicalMaterial({ 
+                color: 0x888888, 
+                transparent: true, 
+                opacity: 0.4,
+                roughness: 0.5,
+                side: THREE.DoubleSide
+            });
+            // 사용자 앞면(Front) 벽은 안을 볼 수 있게 완전히 투명하게 설정
+            const invisibleMaterial = new THREE.MeshBasicMaterial({ visible: false });
+
+            // 재질 배열 (0: Right, 1: Left, 2: Top, 3: Bottom, 4: Front, 5: Back)
+            const materials = [
+                wallMaterial.clone(), // 우
+                wallMaterial.clone(), // 좌
+                wallMaterial.clone(), // 상 (천장)
+                wallMaterial.clone(), // 하 (바닥)
+                invisibleMaterial,    // 전면 (카메라 앞)
+                wallMaterial.clone()  // 후면
+            ];
+
+            roomMesh = new THREE.Mesh(geometry, materials);
+            
+            // 모서리 선(Wireframe) 추가하여 형태감을 살림
+            const edges = new THREE.EdgesGeometry(geometry);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00F0FF, opacity: 0.6, transparent: true }));
+            roomMesh.add(line);
+
+            // 방의 기준점을 화면 중앙으로 맞춤
+            roomMesh.position.set(0, 0, -1);
+            scene.add(roomMesh);
+
+            // 렌더링 루프 시작
+            animateThreeJS();
+        }
+
+        function animateThreeJS() {
+            requestAnimationFrame(animateThreeJS);
+            if (roomMesh) {
+                // 모델을 천천히 회전시켜 3D 임을 인지시킴
+                roomMesh.rotation.y += 0.003;
+                // 약간의 상하 부유 애니메이션
+                roomMesh.position.y = Math.sin(Date.now() * 0.001) * 0.05;
+            }
+            renderer.render(scene, camera);
+        }
+
+        // --- 4. 흡음재 적용 및 결과 시뮬레이션 ---
+        function applyAcousticTreatment() {
+            if (!roomMesh) return;
+
+            // 흡음재 느낌의 불투명한 보라색 재질 생성
+            const acousticMaterial = new THREE.MeshPhysicalMaterial({ 
+                color: 0x9333EA, // Purple-600
+                transparent: true, 
+                opacity: 0.85,
+                roughness: 0.9, // 반사가 없는 매트한 재질 표현
+                side: THREE.DoubleSide
+            });
+
+            // 기존 메쉬의 재질 속성 변경 (좌/우/후면 벽을 보라색 흡음재로 변경)
+            // 0: Right, 1: Left, 5: Back
+            roomMesh.material[0] = acousticMaterial;
+            roomMesh.material[1] = acousticMaterial;
+            roomMesh.material[5] = acousticMaterial;
+
+            showToast("벽면에 50T 폴리에스터 흡음 패널이 자동 적용되었습니다.");
+
+            // 버튼 상태 변경
+            const btn = document.getElementById('btn-treatment');
+            btn.innerHTML = '적용 완료 (음향 데이터 갱신됨)';
+            btn.classList.replace('bg-purple-600', 'bg-green-600');
+            btn.classList.replace('hover:bg-purple-700', 'hover:bg-green-700');
+            btn.disabled = true;
+
+            // 음향 수치 개선 애니메이션 연출
+            setTimeout(() => {
+                const rt60 = document.getElementById('rt60-value');
+                const sti = document.getElementById('sti-value');
+
+                rt60.innerText = "0.58s";
+                rt60.classList.replace('text-red-400', 'text-green-400');
+                
+                sti.innerHTML = '0.76 <span class="text-sm font-normal text-green-200">(Good)</span>';
+                sti.classList.replace('text-yellow-400', 'text-green-400');
+            }, 600);
+        }
+
+        // --- 5. 내보내기 기능 ---
+        function exportSKP() {
+            showToast(`[성공] ${roomData.width}x${roomData.depth} 크기의 SKP 모델 변환이 시작되었습니다.`);
+        }
+    </script>
+</body>
+</html>
